@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 
 	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	"sigs.k8s.io/kustomize/api/filters/patchjson6902"
@@ -29,6 +30,7 @@ var KustomizePlugin plugin //nolint:gochecknoglobals
 
 func (p *plugin) Config(
 	h *resmap.PluginHelpers, c []byte) (err error) {
+	log.Print("Loading json6902 transformer")
 	p.ldr = h.Loader()
 	err = yaml.Unmarshal(c, p)
 	if err != nil {
@@ -74,6 +76,8 @@ func (p *plugin) Config(
 }
 
 func (p *plugin) Transform(m resmap.ResMap) error {
+	log.Print("json6902 transformer transforming")
+	defer log.Print("Done transforming")
 	if p.Target == nil {
 		return fmt.Errorf("must specify a target for patch %s", p.JsonOp)
 	}

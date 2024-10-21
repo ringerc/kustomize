@@ -5,6 +5,7 @@ package builtins
 
 import (
 	"fmt"
+	"log"
 
 	"sigs.k8s.io/kustomize/api/resmap"
 	"sigs.k8s.io/kustomize/api/resource"
@@ -20,6 +21,7 @@ type PatchStrategicMergeTransformerPlugin struct {
 
 func (p *PatchStrategicMergeTransformerPlugin) Config(
 	h *resmap.PluginHelpers, c []byte) (err error) {
+	log.Print("Loading patch strategic merge transformer")
 	err = yaml.Unmarshal(c, p)
 	if err != nil {
 		return err
@@ -71,6 +73,8 @@ func loadFromPaths(
 }
 
 func (p *PatchStrategicMergeTransformerPlugin) Transform(m resmap.ResMap) error {
+	log.Print("Patch strategic merge transformer transforming")
+	defer log.Printf("Done transforming")
 	for _, patch := range p.loadedPatches {
 		target, err := m.GetById(patch.OrgId())
 		if err != nil {

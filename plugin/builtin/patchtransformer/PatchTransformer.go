@@ -19,8 +19,9 @@ import (
 )
 
 type plugin struct {
-	smPatches   []*resource.Resource // strategic-merge patches
-	jsonPatches jsonpatch.Patch      // json6902 patch
+	smPatches   []*resource.Resource  // strategic-merge patches
+	jsonPatches jsonpatch.Patch       // json6902 patch
+	helper      *resmap.PluginHelpers // plugin helper
 	// patchText is pure patch text created by Path or Patch
 	patchText string
 	// patchSource is patch source message
@@ -31,65 +32,82 @@ type plugin struct {
 	Options     map[string]bool `json:"options,omitempty" yaml:"options,omitempty"`
 }
 
+func (p *plugin) errorPrefix() string {
+	return fmt.Sprintf("in \"%s\"", p.helper.GeneralConfig().FnpLoadingOptions.WorkingDir)
+}
+
 var KustomizePlugin plugin //nolint:gochecknoglobals
 
 func (p *plugin) Config(h *resmap.PluginHelpers, c []byte) error {
-	if err := yaml.Unmarshal(c, p); err != nil {
-		return err
-	}
-
-	p.Patch = strings.TrimSpace(p.Patch)
-	switch {
-	case p.Patch == "" && p.Path == "":
-		return fmt.Errorf("must specify one of patch and path in\n%s", string(c))
-	case p.Patch != "" && p.Path != "":
-		return fmt.Errorf("patch and path can't be set at the same time\n%s", string(c))
-	case p.Patch != "":
-		p.patchText = p.Patch
-		p.patchSource = fmt.Sprintf("[patch: %q]", p.patchText)
-	case p.Path != "":
-		loaded, err := h.Loader().Load(p.Path)
-		if err != nil {
-			return fmt.Errorf("failed to get the patch file from path(%s): %w", p.Path, err)
+	p.helper = h
+	err := func() error {
+		if err := yaml.Unmarshal(c, p); err != nil {
+			return err
 		}
-		p.patchText = string(loaded)
-		p.patchSource = fmt.Sprintf("[path: %q]", p.Path)
-	}
 
-	patchesSM, errSM := h.ResmapFactory().RF().SliceFromBytes([]byte(p.patchText))
-	patchesJson, errJson := jsonPatchFromBytes([]byte(p.patchText))
-
-	if (errSM == nil && errJson == nil) ||
-		(patchesSM != nil && patchesJson != nil) {
-		return fmt.Errorf(
-			"illegally qualifies as both an SM and JSON patch: %s",
-			p.patchSource)
-	}
-	if errSM != nil && errJson != nil {
-		return fmt.Errorf(
-			"unable to parse SM or JSON patch from %s", p.patchSource)
-	}
-	if errSM == nil {
-		p.smPatches = patchesSM
-		for _, loadedPatch := range p.smPatches {
-			if p.Options["allowNameChange"] {
-				loadedPatch.AllowNameChange()
+		p.Patch = strings.TrimSpace(p.Patch)
+		switch {
+		case p.Patch == "" && p.Path == "":
+			return fmt.Errorf("must specify one of patch and path in\n%s", string(c))
+		case p.Patch != "" && p.Path != "":
+			return fmt.Errorf("patch and path can't be set at the same time\n%s", string(c))
+		case p.Patch != "":
+			p.patchText = p.Patch
+			p.patchSource = fmt.Sprintf("[patch: %q]", p.patchText)
+		case p.Path != "":
+			loaded, err := h.Loader().Load(p.Path)
+			if err != nil {
+				return fmt.Errorf("failed to get the patch file from path(%s): %w", p.Path, err)
 			}
-			if p.Options["allowKindChange"] {
-				loadedPatch.AllowKindChange()
-			}
+			p.patchText = string(loaded)
+			p.patchSource = fmt.Sprintf("[path: %q]", p.Path)
 		}
-	} else {
-		p.jsonPatches = patchesJson
+
+		patchesSM, errSM := h.ResmapFactory().RF().SliceFromBytes([]byte(p.patchText))
+		patchesJson, errJson := jsonPatchFromBytes([]byte(p.patchText))
+
+		if (errSM == nil && errJson == nil) ||
+			(patchesSM != nil && patchesJson != nil) {
+			return fmt.Errorf(
+				"illegally qualifies as both an SM and JSON patch: %s",
+				p.patchSource)
+		}
+		if errSM != nil && errJson != nil {
+			return fmt.Errorf(
+				"unable to parse SM or JSON patch from %s", p.patchSource)
+		}
+		if errSM == nil {
+			p.smPatches = patchesSM
+			for _, loadedPatch := range p.smPatches {
+				if p.Options["allowNameChange"] {
+					loadedPatch.AllowNameChange()
+				}
+				if p.Options["allowKindChange"] {
+					loadedPatch.AllowKindChange()
+				}
+			}
+		} else {
+			p.jsonPatches = patchesJson
+		}
+		return nil
+	}
+	if err := err(); err != nil {
+		return fmt.Errorf("%s: when configuring patch %s: %w", p.errorPrefix(), p.patchSource, err)
 	}
 	return nil
 }
 
 func (p *plugin) Transform(m resmap.ResMap) error {
 	if p.smPatches != nil {
-		return p.transformStrategicMerge(m)
+		if err := p.transformStrategicMerge(m); err != nil {
+			return fmt.Errorf("%s: while applying strategic merge patch %s: %w", p.errorPrefix(), p.patchSource, err)
+		}
+		return nil
 	}
-	return p.transformJson6902(m)
+	if err := p.transformJson6902(m); err != nil {
+		return fmt.Errorf("%s: while applying json patch %s: %w", p.errorPrefix(), p.patchSource, err)
+	}
+	return nil
 }
 
 // transformStrategicMerge applies each loaded strategic merge patch
@@ -130,16 +148,18 @@ func (p *plugin) transformJson6902(m resmap.ResMap) error {
 	}
 	resources, err := m.Select(*p.Target)
 	if err != nil {
-		return err
+		return fmt.Errorf("while selecting resources: %w", err)
 	}
 	for _, res := range resources {
 		res.StorePreviousId()
+		// We need to save the resource ID because it could be deleted by the patch
+		oldId := res.OrgId()
 		internalAnnotations := kioutil.GetInternalAnnotations(&res.RNode)
 		err = res.ApplyFilter(patchjson6902.Filter{
 			Patch: p.patchText,
 		})
 		if err != nil {
-			return err
+			return fmt.Errorf("resource %s: %w", oldId.String(), err)
 		}
 
 		annotations := res.GetAnnotations()

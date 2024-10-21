@@ -5,6 +5,7 @@ package builtins
 
 import (
 	"fmt"
+	"log"
 
 	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	"sigs.k8s.io/kustomize/api/filters/patchjson6902"
@@ -26,6 +27,7 @@ type PatchJson6902TransformerPlugin struct {
 
 func (p *PatchJson6902TransformerPlugin) Config(
 	h *resmap.PluginHelpers, c []byte) (err error) {
+	log.Print("Loading json6902 transformer")
 	p.ldr = h.Loader()
 	err = yaml.Unmarshal(c, p)
 	if err != nil {
@@ -71,6 +73,8 @@ func (p *PatchJson6902TransformerPlugin) Config(
 }
 
 func (p *PatchJson6902TransformerPlugin) Transform(m resmap.ResMap) error {
+	log.Print("json6902 transformer transforming")
+	defer log.Print("Done transforming")
 	if p.Target == nil {
 		return fmt.Errorf("must specify a target for patch %s", p.JsonOp)
 	}
